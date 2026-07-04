@@ -158,18 +158,43 @@ kernel_stokes_sinking_3d_fast <- function(particles, arr_temp, arr_sal, levels, 
   return(particles)
 }
 
-kernel_phytoplankton_growth_complex <- function(particles, dt, env_no3, env_nh4, env_par, env_temp) {
+kernel_phytoplankton_dynamics <- function(particles, dt, env_no3, env_nh4, env_par, env_temp) {
   if (nrow(particles) == 0) return(particles)
   
-  mu_max   <- 1.5 / 86400  
-  K_NO3    <- 0.5
-  K_NH4    <- 0.1
-  Psi      <- 1.5          
-  I_opt    <- 50           
-  beta_I   <- 0.4          
-  T_opt    <- 24           
-  T_let    <- 12           
-  beta_T   <- 0.5          
+  # ----------------------------------------------------------------------------
+  # A. AGE PROGRESSION
+  # ----------------------------------------------------------------------------
+  dt_hours <- dt / 3600
+  particles$age_hours <- particles$age_hours + dt_hours
+  
+  # ----------------------------------------------------------------------------
+  # B. STOCHASTIC MORTALITY & VIABILITY FILTER
+  # ----------------------------------------------------------------------------
+  # 1. Early-stage mortality: High initial risk that decays exponentially
+  # Drops significantly after the first 6 hours of cell division
+  m_early_base <- 0.05 / 3600  # Base hourly risk converted to per-second
+  prob_die_early <- (m_early_base * exp(-0.15 * particles$age_hours)) * dt
+  
+  # 2. Late-stage viability: Logistic drop-off (inflection point at 72 hours)
+  # Viability stays close to 1.0 early on, then collapses towards 0.0 late-stage
+  viability <- 1 / (1 + exp(0.12 * (particles$age_hours - 72)))
+  prob_die_late <- (1 - viability) * (0.04 / 3600) * dt # Scaled death risk
+  
+  # Combine background and age-dependent risks
+  total_death_prob <- pmin(0.95, prob_die_early + prob_die_late)
+  surviving_mask   <- runif(nrow(particles)) > total_death_prob
+  
+  # Apply immediate mortality pruning
+  particles <- particles[surviving_mask, ]
+  if (nrow(particles) == 0) return(particles)
+  
+  # ----------------------------------------------------------------------------
+  # C. REPRODUCTIVE DIVISION ENGINE (MODECOGeL Based)
+  # ----------------------------------------------------------------------------
+  mu_max <- 1.5 / 86400  
+  K_NO3  <- 0.5; K_NH4 <- 0.1; Psi <- 1.5          
+  I_opt  <- 50;  beta_I <- 0.4          
+  T_opt  <- 24;  T_let <- 12;  beta_T <- 0.5          
   
   lim_NH4 <- env_nh4 / (env_nh4 + K_NH4)
   lim_NO3 <- (env_no3 / (env_no3 + K_NO3)) * exp(-Psi * env_nh4)
@@ -179,12 +204,12 @@ kernel_phytoplankton_growth_complex <- function(particles, dt, env_no3, env_nh4,
   lim_I   <- (2 * (1 + beta_I) * I_rel) / (I_rel^2 + 2 * beta_I * I_rel + 1)
   lim_I   <- pmax(0, pmin(1, lim_I))
   
-  theta   <- (env_temp - T_let) / (T_opt - T_let)
-  theta   <- pmax(0, theta) 
+  theta   <- pmax(0, (env_temp - T_let) / (T_opt - T_let)) 
   lim_T   <- (2 * (1 + beta_T) * theta) / (theta^2 + 2 * beta_T * theta + 1)
   lim_T   <- pmax(0, lim_T)
   
-  mu <- mu_max * lim_I * lim_T * lim_N
+  # Only viable/healthy cells execute high-efficiency division
+  mu <- mu_max * lim_I * lim_T * lim_N * viability[surviving_mask]
   
   division_prob <- mu * dt
   dividing_mask <- runif(nrow(particles)) < division_prob
@@ -194,7 +219,11 @@ kernel_phytoplankton_growth_complex <- function(particles, dt, env_no3, env_nh4,
     max_id    <- max(particles$id)
     new_cells$id <- (max_id + 1):(max_id + nrow(new_cells))
     
-    nudge_scale <- 0.1 
+    # RESET AGE FOR NEWBORN DAUGHTER CELLS
+    new_cells$age_hours <- 0
+    
+    # Small spatial displacement at birth
+    nudge_scale <- 0.1
     new_cells$x <- new_cells$x + rnorm(nrow(new_cells), 0, nudge_scale)
     new_cells$y <- new_cells$y + rnorm(nrow(new_cells), 0, nudge_scale)
     
@@ -203,6 +232,33 @@ kernel_phytoplankton_growth_complex <- function(particles, dt, env_no3, env_nh4,
   
   return(particles)
 }
+
+
+#--------
+# this is a test
+#----------
+
+# apply_patch_movement_cohesion <- function(particles, patch_radius = 0.1, cohesion_factor = 0.2) {
+#   # Cluster nearby cells into dynamic irregular patches
+#   hc <- hclust(dist(particles[, c("x", "y")]), method = "quick")
+#   # Group into discrete irregular patches based on your spatial threshold
+#   particles$patch_id <- cutree(hc, h = patch_radius)
+#   
+#   # Pull individual cells slightly toward their specific irregular patch center
+#   for(p in unique(particles$patch_id)) {
+#     idx <- which(particles$patch_id == p)
+#     if(length(idx) > 1) {
+#       mean_x <- mean(particles$x[idx])
+#       mean_y <- mean(particles$y[idx])
+#       
+#       # Nudge cells toward the patch gravity center to maintain patch boundaries
+#       particles$x[idx] <- particles$x[idx] + (mean_x - particles$x[idx]) * cohesion_factor
+#       particles$y[idx] <- particles$y[idx] + (mean_y - particles$y[idx]) * cohesion_factor
+#     }
+#   }
+#   return(particles)
+# }
+
 
 # ==============================================================================
 # 4. PARTICLESET INITIALIZATION 
@@ -214,12 +270,12 @@ particle_set <- data.frame(
   id                   = 1:n_particles,
   x                    = runif(n_particles, 65.0, 70.0),
   y                    = runif(n_particles, 18.0, 20.0),
-  z                    = rep(0.5, n_particles), # FIX: Restructured static upper photic depth instantiation
+  z                    = rep(0.5, n_particles),
   diameter             = runif(n_particles, 30e-6, 90e-6), 
   rho_p                = runif(n_particles, 1035, 1045),  
-  settling_velocity_ms = 0
+  settling_velocity_ms = 0,
+  age_hours            = runif(n_particles, 0, 24) # Seed cells have mixed initial ages
 )
-
 # ==============================================================================
 # 5. SIMULATION LOGIC CORE & DATA ARCHIVING
 # ==============================================================================
@@ -243,7 +299,7 @@ for (step in 0:n_steps) {
     particle_set <- particle_set |> 
       kernel_advection_rk4_3d_fast(master_u, master_v, real_depths, dt, current_time_idx) |> 
       kernel_stokes_sinking_3d_fast(master_temp, master_sal, real_depths, dt, current_time_idx) |> 
-      kernel_phytoplankton_growth_complex(dt, p_no3, p_nh4, p_par, p_temp) # FIX: Added required extracted environmental variables
+      kernel_phytoplankton_dynamics(dt, p_no3, p_nh4, p_par, p_temp) # FIX: Added required extracted environmental variables
   }
   
   snapshot <- particle_set
@@ -259,7 +315,7 @@ cat("Assembling final dataset...\n")
 master_export_df <- do.call(rbind, full_simulation_archive)
 
 master_export_df <- master_export_df[, c("simulation_step", "elapsed_hours", "id", 
-                                         "x", "y", "z", "diameter", "rho_p", 
+                                         "x", "y", "z", "diameter", "rho_p", "age_hours",
                                          "settling_velocity_ms")]
 
 write.csv(master_export_df, "simulated_phytoplankton_trajectories.csv", row.names = FALSE)
