@@ -56,4 +56,30 @@ plot(masked_raster$var1.pred,col=matlab.like(30))
 points(test$x,test$y,col="darkgreen",pch=16)
 
 
+# 
+# fine_raster <- disagg(masked_raster, fact = 100, method = "bilinear")
+# 
+# # 2. Apply a Gaussian or moving average filter to blur and smooth out the sharp edges
+# # W is a 5x5 matrix of weights
+# smooth_raster <- focal(fine_raster, w = 5, fun = "mean", na.rm = TRUE)
+# 
+# # 3. Mask it one more time to clip any "blur bleeding" outside the buffer
+# final_smooth <- mask(smooth_raster, mask_poly)
+# 
+# plot(final_smooth$var1.pred)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

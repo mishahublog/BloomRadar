@@ -80,19 +80,9 @@ if (n_depths < 2) {
   stop("At least two common depth levels are required.")
 }
 
-cat(
-  "Common depth levels:",
-  n_depths,
-  "\n"
-)
+cat("Common depth levels:",n_depths,"\n")
 
-cat(
-  "Depth range:",
-  min(real_depths),
-  "-",
-  max(real_depths),
-  "m\n"
-)
+cat( "Depth range:",min(real_depths), "-", max(real_depths),"m\n")
 
 ############################################################
 # 4. DETERMINE COMMON TIME STEPS
@@ -104,13 +94,7 @@ get_time_layers <- function(r, n_depths) {
   
   if (n_layers %% n_depths != 0) {
     
-    warning(
-      "Layers (",
-      n_layers,
-      ") are not exactly divisible by depth levels (",
-      n_depths,
-      ")."
-    )
+    warning("Layers (",n_layers,") are not exactly divisible by depth levels (",n_depths,").")
   }
   
   floor(n_layers / n_depths)
@@ -2141,8 +2125,8 @@ for (
       particle_set <-
         apply_patch_movement_cohesion_fast(
           particle_set,
-          patch_radius = 0.05,
-          cohesion_factor = 0.1
+          patch_radius = 0.005,
+          cohesion_factor = 0.7
         )
     }
   }
