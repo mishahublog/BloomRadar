@@ -183,6 +183,19 @@ r_ylo <- min(sim$y) - r_pady
 r_yhi <- max(sim$y) + r_pady
 
 ############################################################
+# 3a. DEPTH COLOURS (same scale in every step)
+############################################################
+
+z_dom <- range(sim$z[is.finite(sim$z)])
+if (diff(z_dom) == 0) z_dom <- z_dom + c(-0.5, 0.5)
+
+# shallow = yellow, deep = dark purple
+depth_pal <- colorBin(
+  palette = "viridis", domain = z_dom, bins = 6, pretty = TRUE,
+  reverse = TRUE
+)
+
+############################################################
 # 3b. VARIABLES FOR THE DISTRIBUTION PLOTS
 ############################################################
 
@@ -216,7 +229,108 @@ ui <- fluidPage(
     }
     .panel-box h5 { margin: 6px 0 4px 0; font-weight: 600; }
     .info-line { font-size: 12.5px; line-height: 1.5; }
+
+    /* simulation-step slider: transparent, medium length, bottom centre */
+    .bottom-bar {
+      position: fixed; left: 50%; bottom: 14px;
+      transform: translateX(-50%);
+      width: min(720px, 86vw);
+      padding: 0 6px;
+      background: transparent;
+      z-index: 1000;
+    }
+    .bottom-bar .form-group { margin-bottom: 0; width: 100%; }
+    .bottom-bar .irs { width: 100%; }
+    /* no background, so keep the text readable over the map */
+    .bottom-bar label.control-label,
+    .bottom-bar .irs-min, .bottom-bar .irs-max, .bottom-bar .irs-grid-text {
+      color: #111 !important; font-weight: 600;
+      text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 6px #fff !important;
+    }
+    .bottom-bar .irs-min, .bottom-bar .irs-max {
+      background: rgba(255,255,255,0.7) !important;
+    }
+    .bottom-bar .irs-line { box-shadow: 0 0 4px rgba(255,255,255,0.9); }
+    .bottom-bar .slider-animate-container { text-align: left; margin-top: 2px; }
+    .bottom-bar .slider-animate-button {
+      background: rgba(255,255,255,0.85); color: #111;
+      border-radius: 4px; padding: 0 8px; text-shadow: none;
+    }
+
+    /* the bar is centred, so the map's bottom controls only need to move
+       up on narrow screens where they would sit under it */
+    .leaflet-bottom { bottom: 0; }
+    @media (max-width: 1150px) { .leaflet-bottom { bottom: 84px; } }
+
+    /* ---- settings modal ----
+       Always present in the page (so every input has a value from the
+       start); only shown/hidden. visibility (not display:none) keeps the
+       layout, so sliders and the plot measure their width correctly. */
+    .settings-modal {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 3000;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.45);
+      visibility: hidden; opacity: 0; pointer-events: none;
+      transition: opacity .15s ease, visibility .15s;
+    }
+    .settings-modal.open {
+      visibility: visible; opacity: 1; pointer-events: auto;
+    }
+    .settings-dialog {
+      background: #fff; border-radius: 10px;
+      width: min(760px, 94vw); max-height: 90vh;
+      display: flex; flex-direction: column;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+    }
+    .settings-head {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 18px; border-bottom: 1px solid #ddd;
+    }
+    .settings-head h4 { margin: 0; }
+    .settings-close {
+      border: 0; background: transparent; font-size: 26px; line-height: 1;
+      color: #666; cursor: pointer; padding: 0 4px;
+    }
+    .settings-close:hover { color: #000; }
+    .settings-body {
+      overflow-y: auto; padding: 14px 18px 6px 18px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(240px, 1fr));
+      gap: 0 32px;
+    }
+    @media (max-width: 760px) {
+      .settings-body { grid-template-columns: 1fr; }
+    }
+    .settings-body h5 {
+      margin: 4px 0 8px 0; font-weight: 600;
+      border-bottom: 1px solid #eee; padding-bottom: 4px;
+    }
+    .settings-foot {
+      padding: 10px 18px; border-top: 1px solid #ddd; text-align: right;
+    }
+    .panel-head {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 8px;
+    }
+    .panel-head h4 { margin: 0; }
   "))),
+  
+  tags$script(HTML("
+    function openSettings() {
+      document.getElementById('settings_modal').classList.add('open');
+      // let sliders / the plot re-measure once the dialog is visible
+      setTimeout(function() {
+        window.dispatchEvent(new Event('resize'));
+      }, 60);
+    }
+    function closeSettings() {
+      document.getElementById('settings_modal').classList.remove('open');
+    }
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeSettings();
+    });
+  ")),
   
   leafletOutput("map", width = "100%", height = "100vh"),
   
@@ -225,28 +339,38 @@ ui <- fluidPage(
     actionButton("reset_view", "Reset view", icon = icon("crosshairs"))
   ),
   
-  absolutePanel(
-    class = "panel-box",
-    top = 12, right = 12, width = 320, draggable = TRUE,
-    style = "max-height: 95vh; overflow-y: auto;",
-    
-    h4("Phytoplankton patch"),
-    
+  # Simulation step slider + play button: bottom centre, medium length,
+  # transparent background
+  div(
+    class = "bottom-bar",
     sliderInput(
       "step_idx", "Simulation step",
       min = 1, max = n_steps, value = 1, step = 1,
+      width = "100%",
       animate = animationOptions(interval = 2000, loop = TRUE)
+    )
+  ),
+  
+  # Compact info panel: title, Settings button and the step read-out
+  absolutePanel(
+    class = "panel-box",
+    top = 12, right = 12, width = 320, draggable = TRUE,
+    style = "max-height: calc(100vh - 130px); overflow-y: auto;",
+    
+    div(
+      class = "panel-head",
+      h4("Phytoplankton patch"),
+      tags$button(
+        type = "button", class = "btn btn-default btn-sm",
+        onclick = "openSettings()",
+        icon("cog"), " Settings"
+      )
     ),
+    hr(style = "margin: 8px 0;"),
     uiOutput("info"),
     
-    hr(),
-    h5("Patch"),
-    checkboxInput("show_track", "Centroid track", TRUE),
-    sliderInput("trail_len", "Cell trails (steps)",
-                min = 0, max = 10, value = 3, step = 1),
-    checkboxInput("show_cells", "Show points (individual cells)", TRUE),
-    
-    hr(),
+    # Distributions: always visible (not part of the settings modal)
+    hr(style = "margin: 8px 0;"),
     h5("Distributions"),
     selectInput("dist_var", "Variable",
                 choices = dist_choices, selected = dist_choices[1]),
@@ -257,13 +381,66 @@ ui <- fluidPage(
     sliderInput("dist_bins", "Bins",
                 min = 5, max = 50, value = 20, step = 1),
     plotOutput("dist_plot", height = "200px"),
-    verbatimTextOutput("dist_stats"),
+    verbatimTextOutput("dist_stats")
+  ),
+  
+  # All settings in one modal dialog (click outside, x, Close or Esc to close)
+  div(
+    id = "settings_modal", class = "settings-modal",
+    onclick = "if (event.target === this) closeSettings();",
     
-    hr(),
-    h5("Currents"),
-    p("Configure the current-flow animation in a separate dialog."),
-    actionButton("current_settings", "Current settings",
-                 icon = icon("sliders"), class = "btn-primary btn-sm")
+    div(
+      class = "settings-dialog",
+      
+      div(
+        class = "settings-head",
+        h4("Settings"),
+        tags$button(
+          type = "button", class = "settings-close",
+          onclick = "closeSettings()", `aria-label` = "Close",
+          HTML("&times;")
+        )
+      ),
+      
+      div(
+        class = "settings-body",
+        
+        # left column: patch
+        div(
+          h5("Patch"),
+          checkboxInput("show_track", "Centroid track", TRUE),
+          sliderInput("trail_len", "Cell trails (steps)",
+                      min = 0, max = 10, value = 3, step = 1),
+          checkboxInput("show_cells", "Show points (individual cells)", TRUE),
+          checkboxInput("show_depth_labels", "Write the depth on each point", FALSE)
+        ),
+        
+        # right column: currents
+        div(
+          h5("Currents (u, v from the table)"),
+          checkboxInput("show_flow", "Show flow animation", TRUE),
+          sliderInput("radius", "Influence radius (deg)",
+                      min = 0.5, max = 10, value = 2, step = 0.5),
+          sliderInput("power", "IDW power",
+                      min = 1, max = 4, value = 2, step = 0.5),
+          sliderInput("velocity_scale", "Velocity scale",
+                      min = 0.1, max = 5, value = 1, step = 0.1),
+          sliderInput("particle_mult", "Particle density",
+                      min = 0.5, max = 10, value = 3, step = 0.5),
+          sliderInput("line_width", "Line width",
+                      min = 0.5, max = 4, value = 2, step = 0.5)
+        ),
+        
+      ),
+      
+      div(
+        class = "settings-foot",
+        tags$button(
+          type = "button", class = "btn btn-primary",
+          onclick = "closeSettings()", "Close"
+        )
+      )
+    )
   )
 )
 
@@ -272,52 +449,6 @@ ui <- fluidPage(
 ############################################################
 
 server <- function(input, output, session) {
-  
-  # Current-flow settings are stored separately from the modal inputs, so the
-  # animation works with sensible defaults before the dialog is first opened.
-  current_cfg <- reactiveValues(
-    show_flow = TRUE,
-    radius = 2,
-    power = 2,
-    velocity_scale = 1,
-    particle_mult = 3,
-    line_width = 2
-  )
-  
-  observeEvent(input$current_settings, {
-    showModal(modalDialog(
-      title = "Current-flow settings",
-      size = "m",
-      easyClose = TRUE,
-      footer = tagList(
-        modalButton("Cancel"),
-        actionButton("apply_current_settings", "Apply settings",
-                     class = "btn-primary")
-      ),
-      checkboxInput("modal_show_flow", "Show flow animation",
-                    value = current_cfg$show_flow),
-      sliderInput("modal_radius", "Influence radius (deg)",
-                  min = 0.5, max = 10, value = current_cfg$radius, step = 0.5),
-      sliderInput("modal_power", "IDW power",
-                  min = 1, max = 4, value = current_cfg$power, step = 0.5),
-      sliderInput("modal_velocity_scale", "Velocity scale",
-                  min = 0.1, max = 5, value = current_cfg$velocity_scale, step = 0.1),
-      sliderInput("modal_particle_mult", "Particle density",
-                  min = 0.5, max = 10, value = current_cfg$particle_mult, step = 0.5),
-      sliderInput("modal_line_width", "Line width",
-                  min = 0.5, max = 4, value = current_cfg$line_width, step = 0.5)
-    ))
-  })
-  
-  observeEvent(input$apply_current_settings, {
-    current_cfg$show_flow <- isTRUE(input$modal_show_flow)
-    current_cfg$radius <- input$modal_radius
-    current_cfg$power <- input$modal_power
-    current_cfg$velocity_scale <- input$modal_velocity_scale
-    current_cfg$particle_mult <- input$modal_particle_mult
-    current_cfg$line_width <- input$modal_line_width
-    removeModal()
-  }, ignoreInit = TRUE)
   
   cur_step  <- reactive(steps[input$step_idx])
   step_data <- reactive(sim[sim$simulation_step == cur_step(), ])
@@ -353,6 +484,8 @@ server <- function(input, output, session) {
     if (nrow(d) > 0) {
       lines <- c(lines, sprintf("Mean current at cells: u=%.3f, v=%.3f m/s",
                                 mean(d$u), mean(d$v)))
+      lines <- c(lines, sprintf("Depth: mean %.1f m (range %.1f to %.1f m)",
+                                mean(d$z), min(d$z), max(d$z)))
     }
     
     div(class = "info-line", HTML(paste(lines, collapse = "<br>")))
@@ -380,12 +513,12 @@ server <- function(input, output, session) {
   
   observe({
     proxy <- leafletProxy("map") |> removeVelocity(group = "velocity")
-    if (!isTRUE(current_cfg$show_flow)) return()
+    if (!isTRUE(input$show_flow)) return()
     
     d <- step_data()
     if (nrow(d) == 0) return()
     
-    f <- make_field(d, current_cfg$power, current_cfg$radius)
+    f <- make_field(d, input$power, input$radius)
     
     max_speed <- max(sqrt(f$u^2 + f$v^2), na.rm = TRUE)
     if (!is.finite(max_speed) || max_speed <= 0) max_speed <- 1
@@ -400,9 +533,9 @@ server <- function(input, output, session) {
           minVelocity        = 0,
           maxVelocity        = max_speed,
           # tuned for ocean currents (~0.1-1 m/s); the default is for wind
-          velocityScale      = (0.05 / max_speed) * current_cfg$velocity_scale,
-          particleMultiplier = current_cfg$particle_mult / 1000,
-          lineWidth          = current_cfg$line_width,
+          velocityScale      = (0.05 / max_speed) * input$velocity_scale,
+          particleMultiplier = input$particle_mult / 1000,
+          lineWidth          = input$line_width,
           opacity            = 0.97,
           colorScale         = c("#1d3557", "#2a6f97", "#6a4c93",
                                  "#c1121f", "#7b0828")
@@ -501,7 +634,9 @@ server <- function(input, output, session) {
   MERGE_PX <- 8
   
   observe({
-    proxy <- leafletProxy("map") |> clearGroup("Cells")
+    proxy <- leafletProxy("map") |>
+      clearGroup("Cells") |>
+      removeControl("depth_legend")
     
     d <- step_data()
     if (!isTRUE(input$show_cells) || nrow(d) == 0) return()
@@ -535,34 +670,71 @@ server <- function(input, output, session) {
       m$n, ifelse(m$n == 1, "", "s"), ids_txt, m$z
     )
     
+    # hover text: depth of the cell (mean depth for merged markers)
+    hover_txt <- ifelse(
+      m$n == 1,
+      sprintf("Depth %.1f m", m$z),
+      sprintf("%d cells, mean depth %.1f m", m$n, m$z)
+    )
+    
+    # markers coloured by depth
     proxy <- proxy |>
       addCircleMarkers(
         lng = m$x, lat = m$y,
         radius = pmin(22, 5 + 3 * log2(m$n)),
         weight = 1.5,
         color = "#ffffff",
-        fillColor = ifelse(m$n > 1, "#1b9e5a", "#2ecc71"),
-        fillOpacity = 0.9,
+        fillColor = depth_pal(m$z),
+        fillOpacity = 0.95,
         popup = popup_txt,
+        label = hover_txt,
         group = "Cells"
       )
     
     # count labels only on merged markers
     mm <- m[m$n > 1, , drop = FALSE]
     if (nrow(mm) > 0) {
-      proxy |>
+      proxy <- proxy |>
         addLabelOnlyMarkers(
           lng = mm$x, lat = mm$y,
           label = as.character(mm$n),
           labelOptions = labelOptions(
             noHide = TRUE, direction = "center", textOnly = TRUE,
             style = list("font-weight" = "bold", "font-size" = "11px",
-                         "color" = "#ffffff",
-                         "text-shadow" = "0 0 3px #0b3d20")
+                         "color" = "#111111",
+                         "text-shadow" = "0 0 3px #fff, 0 0 3px #fff")
           ),
           group = "Cells"
         )
     }
+    
+    # optional: write the depth next to every marker
+    if (isTRUE(input$show_depth_labels)) {
+      proxy <- proxy |>
+        addLabelOnlyMarkers(
+          lng = m$x, lat = m$y,
+          label = sprintf("%.1f m", m$z),
+          labelOptions = labelOptions(
+            noHide = TRUE, direction = "bottom", textOnly = TRUE,
+            offset = c(0, 10),
+            style = list("font-weight" = "600", "font-size" = "10.5px",
+                         "color" = "#111111",
+                         "text-shadow" = "0 0 3px #fff, 0 0 3px #fff, 0 0 5px #fff")
+          ),
+          group = "Cells"
+        )
+    }
+    
+    # depth legend (shallow at the top)
+    proxy |>
+      addLegend(
+        position = "bottomleft",
+        pal = depth_pal, values = z_dom,
+        title = "Depth (m)",
+        labFormat = labelFormat(digits = 1),
+        opacity = 0.95,
+        layerId = "depth_legend"
+      )
   })
   
   # re-draw the merged cells when the zoom changes (input$map_zoom is
