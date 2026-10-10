@@ -260,18 +260,10 @@ ui <- fluidPage(
     verbatimTextOutput("dist_stats"),
     
     hr(),
-    h5("Currents (u, v from the table)"),
-    checkboxInput("show_flow", "Show flow animation", TRUE),
-    sliderInput("radius", "Influence radius (deg)",
-                min = 0.5, max = 10, value = 2, step = 0.5),
-    sliderInput("power", "IDW power",
-                min = 1, max = 4, value = 2, step = 0.5),
-    sliderInput("velocity_scale", "Velocity scale",
-                min = 0.1, max = 5, value = 1, step = 0.1),
-    sliderInput("particle_mult", "Particle density",
-                min = 0.5, max = 10, value = 3, step = 0.5),
-    sliderInput("line_width", "Line width",
-                min = 0.5, max = 4, value = 2, step = 0.5)
+    h5("Currents"),
+    p("Configure the current-flow animation in a separate dialog."),
+    actionButton("current_settings", "Current settings",
+                 icon = icon("sliders"), class = "btn-primary btn-sm")
   )
 )
 
@@ -280,6 +272,52 @@ ui <- fluidPage(
 ############################################################
 
 server <- function(input, output, session) {
+  
+  # Current-flow settings are stored separately from the modal inputs, so the
+  # animation works with sensible defaults before the dialog is first opened.
+  current_cfg <- reactiveValues(
+    show_flow = TRUE,
+    radius = 2,
+    power = 2,
+    velocity_scale = 1,
+    particle_mult = 3,
+    line_width = 2
+  )
+  
+  observeEvent(input$current_settings, {
+    showModal(modalDialog(
+      title = "Current-flow settings",
+      size = "m",
+      easyClose = TRUE,
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("apply_current_settings", "Apply settings",
+                     class = "btn-primary")
+      ),
+      checkboxInput("modal_show_flow", "Show flow animation",
+                    value = current_cfg$show_flow),
+      sliderInput("modal_radius", "Influence radius (deg)",
+                  min = 0.5, max = 10, value = current_cfg$radius, step = 0.5),
+      sliderInput("modal_power", "IDW power",
+                  min = 1, max = 4, value = current_cfg$power, step = 0.5),
+      sliderInput("modal_velocity_scale", "Velocity scale",
+                  min = 0.1, max = 5, value = current_cfg$velocity_scale, step = 0.1),
+      sliderInput("modal_particle_mult", "Particle density",
+                  min = 0.5, max = 10, value = current_cfg$particle_mult, step = 0.5),
+      sliderInput("modal_line_width", "Line width",
+                  min = 0.5, max = 4, value = current_cfg$line_width, step = 0.5)
+    ))
+  })
+  
+  observeEvent(input$apply_current_settings, {
+    current_cfg$show_flow <- isTRUE(input$modal_show_flow)
+    current_cfg$radius <- input$modal_radius
+    current_cfg$power <- input$modal_power
+    current_cfg$velocity_scale <- input$modal_velocity_scale
+    current_cfg$particle_mult <- input$modal_particle_mult
+    current_cfg$line_width <- input$modal_line_width
+    removeModal()
+  }, ignoreInit = TRUE)
   
   cur_step  <- reactive(steps[input$step_idx])
   step_data <- reactive(sim[sim$simulation_step == cur_step(), ])
@@ -342,12 +380,12 @@ server <- function(input, output, session) {
   
   observe({
     proxy <- leafletProxy("map") |> removeVelocity(group = "velocity")
-    if (!isTRUE(input$show_flow)) return()
+    if (!isTRUE(current_cfg$show_flow)) return()
     
     d <- step_data()
     if (nrow(d) == 0) return()
     
-    f <- make_field(d, input$power, input$radius)
+    f <- make_field(d, current_cfg$power, current_cfg$radius)
     
     max_speed <- max(sqrt(f$u^2 + f$v^2), na.rm = TRUE)
     if (!is.finite(max_speed) || max_speed <= 0) max_speed <- 1
@@ -362,9 +400,9 @@ server <- function(input, output, session) {
           minVelocity        = 0,
           maxVelocity        = max_speed,
           # tuned for ocean currents (~0.1-1 m/s); the default is for wind
-          velocityScale      = (0.05 / max_speed) * input$velocity_scale,
-          particleMultiplier = input$particle_mult / 1000,
-          lineWidth          = input$line_width,
+          velocityScale      = (0.05 / max_speed) * current_cfg$velocity_scale,
+          particleMultiplier = current_cfg$particle_mult / 1000,
+          lineWidth          = current_cfg$line_width,
           opacity            = 0.97,
           colorScale         = c("#1d3557", "#2a6f97", "#6a4c93",
                                  "#c1121f", "#7b0828")
