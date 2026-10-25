@@ -6,14 +6,15 @@
 #           interpolated to a grid per step (IDW), because the table
 #           only holds u/v where cells are. The flow fades to zero
 #           away from the cells.
-#  - Patch: centroid track (+ drift speed), fading cell trails, points
+#  - Patch: HEAT MAP of cell density (+ cell counts as numbers),
+#           centroid track (+ drift speed), fading cell trails
 ############################################################
 
-# install.packages(c("shiny", "leaflet", "leaflet.extras2", "jsonlite"))
+# install.packages(c("shiny", "leaflet", "leaflet.extras", "leaflet.extras2", "jsonlite"))
 
 library(shiny)
 library(leaflet)
-library(leaflet.extras2)
+library(leaflet.extras2)    # addVelocity()
 library(jsonlite)
 
 ############################################################
@@ -62,11 +63,6 @@ cent <- cent[order(cent$step), ]
 # 1b. FLOW FIELD FROM THE TABLE (u, v of the cells)
 ##########################################################
 
-# The table only has u/v at the cell positions, so a continuous field is
-# built per step by inverse-distance weighting (IDW) onto a regular grid.
-# The field fades to zero with distance from the nearest cell
-# ("influence radius"), so it is only meaningful near the patch.
-
 FLOW_PAD <- 2          # degrees of padding around all positions in the table
 nx <- 70
 ny <- 55
@@ -103,8 +99,6 @@ make_field <- function(d, power, radius) {
   list(u = u * fade, v = v * fade)
 }
 
-# leaflet-velocity JSON (row-major, N -> S, W -> E). addVelocity() takes a
-# JSON object / file path / data.frame (not a plain list) via `content`.
 make_velocity <- function(u, v) {
   header <- function(param_number) {
     list(
@@ -147,7 +141,6 @@ hav_km <- function(lon1, lat1, lon2, lat2) {
   2 * r * asin(sqrt(a))
 }
 
-# Covariance of the cells in local kilometres (x scaled by cos(lat))
 local_km_cov <- function(d) {
   if (nrow(d) < 3) return(NULL)
   kx <- 111.32 * cos(mean(d$y) * pi / 180)
@@ -156,25 +149,44 @@ local_km_cov <- function(d) {
   list(S = cov(X), kx = kx, ky = ky)
 }
 
-# RMS patch radius in km
 patch_rms_km <- function(d) {
   lc <- local_km_cov(d)
   if (is.null(lc)) return(NA_real_)
   sqrt(sum(diag(lc$S)))
 }
 
+# Push points apart until none are closer than `min_dist` (same units as
+# x / y). Used so the count numbers and depth labels do not pile up.
+repel_xy <- function(x, y, min_dist, iters = 40) {
+  n <- length(x)
+  if (n < 2 || min_dist <= 0) return(list(x = x, y = y))
+  x <- x + sin(seq_len(n) * 12.9898) * 1e-3 * min_dist   # separates exact overlaps
+  y <- y + cos(seq_len(n) * 78.233)  * 1e-3 * min_dist
+  for (k in seq_len(iters)) {
+    ddx <- outer(x, x, "-")
+    ddy <- outer(y, y, "-")
+    dm  <- sqrt(ddx^2 + ddy^2)
+    diag(dm) <- Inf
+    close <- dm < min_dist
+    if (!any(close)) break
+    push <- ifelse(close, (min_dist - dm) / (2 * dm), 0)
+    x <- x + rowSums(push * ddx)
+    y <- y + rowSums(push * ddy)
+  }
+  list(x = x, y = y)
+}
+
 ############################################################
-# 3. MAP BOUNDS (all positions in the table, padded)
+# 3. MAP BOUNDS
 ############################################################
 
-D_PAD <- 2   # degrees of padding around all positions in the table
+D_PAD <- 2
 
 d_xlo <- min(sim$x) - D_PAD
 d_xhi <- max(sim$x) + D_PAD
 d_ylo <- min(sim$y) - D_PAD
 d_yhi <- max(sim$y) + D_PAD
 
-# Tight frame around the data (all steps) for the "Reset view" button
 r_padx <- max(0.1, 0.1 * (max(sim$x) - min(sim$x)))
 r_pady <- max(0.1, 0.1 * (max(sim$y) - min(sim$y)))
 r_xlo <- min(sim$x) - r_padx
@@ -183,13 +195,45 @@ r_ylo <- min(sim$y) - r_pady
 r_yhi <- max(sim$y) + r_pady
 
 ############################################################
-# 3a. DEPTH COLOURS (same scale in every step)
+# 3a. HEAT MAP GRADIENT (low density -> high density)
 ############################################################
+
+# Weather-radar style colour scale (weak -> strong), like a reflectivity map
+radar_cols <- c("#4a5fd0", "#00b4f0", "#00e000", "#009000",
+                "#ffff00", "#ffa500", "#ff0000", "#a00000", "#ff00ff")
+
+# Fixed grid over the whole data extent. Cell counts per grid box are
+# pre-computed for every step; smoothing (a Gaussian) is applied in the app.
+RAD_PADX <- max(0.2, 0.3 * (max(sim$x) - min(sim$x)))
+RAD_PADY <- max(0.2, 0.3 * (max(sim$y) - min(sim$y)))
+rad_xlo <- min(sim$x) - RAD_PADX
+rad_xhi <- max(sim$x) + RAD_PADX
+rad_ylo <- min(sim$y) - RAD_PADY
+rad_yhi <- max(sim$y) + RAD_PADY
+GNX <- 140
+GNY <- 110
+rdx <- (rad_xhi - rad_xlo) / GNX
+rdy <- (rad_yhi - rad_ylo) / GNY
+
+count_grid <- function(d) {
+  ix <- pmin(GNX, pmax(1, floor((d$x - rad_xlo) / rdx) + 1))
+  iy <- pmin(GNY, pmax(1, floor((d$y - rad_ylo) / rdy) + 1))
+  matrix(tabulate((ix - 1) * GNY + iy, nbins = GNX * GNY), nrow = GNY, ncol = GNX)
+}
+count_list <- lapply(steps, function(s) count_grid(sim[sim$simulation_step == s, ]))
+
+gauss_mat <- function(n, sigma) {
+  idx <- seq_len(n)
+  exp(-outer(idx, idx, "-")^2 / (2 * sigma^2))
+}
+smooth_grid <- function(C, sigma) {
+  gauss_mat(GNY, sigma) %*% C %*% gauss_mat(GNX, sigma)
+}
 
 z_dom <- range(sim$z[is.finite(sim$z)])
 if (diff(z_dom) == 0) z_dom <- z_dom + c(-0.5, 0.5)
 
-# shallow = yellow, deep = dark purple
+# depth colours: shallow = yellow, deep = dark purple
 depth_pal <- colorBin(
   palette = "viridis", domain = z_dom, bins = 6, pretty = TRUE,
   reverse = TRUE
@@ -230,7 +274,6 @@ ui <- fluidPage(
     .panel-box h5 { margin: 6px 0 4px 0; font-weight: 600; }
     .info-line { font-size: 12.5px; line-height: 1.5; }
 
-    /* simulation-step slider: transparent, medium length, bottom centre */
     .bottom-bar {
       position: fixed; left: 50%; bottom: 14px;
       transform: translateX(-50%);
@@ -241,7 +284,6 @@ ui <- fluidPage(
     }
     .bottom-bar .form-group { margin-bottom: 0; width: 100%; }
     .bottom-bar .irs { width: 100%; }
-    /* no background, so keep the text readable over the map */
     .bottom-bar label.control-label,
     .bottom-bar .irs-min, .bottom-bar .irs-max, .bottom-bar .irs-grid-text {
       color: #111 !important; font-weight: 600;
@@ -257,15 +299,9 @@ ui <- fluidPage(
       border-radius: 4px; padding: 0 8px; text-shadow: none;
     }
 
-    /* the bar is centred, so the map's bottom controls only need to move
-       up on narrow screens where they would sit under it */
     .leaflet-bottom { bottom: 0; }
     @media (max-width: 1150px) { .leaflet-bottom { bottom: 84px; } }
 
-    /* ---- settings modal ----
-       Always present in the page (so every input has a value from the
-       start); only shown/hidden. visibility (not display:none) keeps the
-       layout, so sliders and the plot measure their width correctly. */
     .settings-modal {
       position: fixed; top: 0; left: 0; right: 0; bottom: 0;
       z-index: 3000;
@@ -319,7 +355,6 @@ ui <- fluidPage(
   tags$script(HTML("
     function openSettings() {
       document.getElementById('settings_modal').classList.add('open');
-      // let sliders / the plot re-measure once the dialog is visible
       setTimeout(function() {
         window.dispatchEvent(new Event('resize'));
       }, 60);
@@ -339,19 +374,16 @@ ui <- fluidPage(
     actionButton("reset_view", "Reset view", icon = icon("crosshairs"))
   ),
   
-  # Simulation step slider + play button: bottom centre, medium length,
-  # transparent background
   div(
     class = "bottom-bar",
     sliderInput(
       "step_idx", "Simulation step",
       min = 1, max = n_steps, value = 1, step = 1,
       width = "100%",
-      animate = animationOptions(interval = 2000, loop = TRUE)
+      animate = animationOptions(interval = 800, loop = TRUE)
     )
   ),
   
-  # Compact info panel: title, Settings button and the step read-out
   absolutePanel(
     class = "panel-box",
     top = 12, right = 12, width = 320, draggable = TRUE,
@@ -369,7 +401,6 @@ ui <- fluidPage(
     hr(style = "margin: 8px 0;"),
     uiOutput("info"),
     
-    # Distributions: always visible (not part of the settings modal)
     hr(style = "margin: 8px 0;"),
     h5("Distributions"),
     selectInput("dist_var", "Variable",
@@ -384,7 +415,6 @@ ui <- fluidPage(
     verbatimTextOutput("dist_stats")
   ),
   
-  # All settings in one modal dialog (click outside, x, Close or Esc to close)
   div(
     id = "settings_modal", class = "settings-modal",
     onclick = "if (event.target === this) closeSettings();",
@@ -408,11 +438,20 @@ ui <- fluidPage(
         # left column: patch
         div(
           h5("Patch"),
+          checkboxInput("show_heat", "Radar-style density field", TRUE),
+          sliderInput("heat_sigma", "Smoothing (grid boxes)",
+                      min = 1, max = 15, value = 6, step = 0.5),
+          sliderInput("heat_min", "Hide below (fraction of max)",
+                      min = 0, max = 0.5, value = 0.03, step = 0.01),
+          sliderInput("heat_opacity", "Field opacity",
+                      min = 0.2, max = 1, value = 0.85, step = 0.05),
+          sliderInput("repel_px", "Spot repel distance (px, 0 = off)",
+                      min = 0, max = 80, value = 30, step = 5),
+          checkboxInput("show_cells", "Show numbers / hover info", TRUE),
+          checkboxInput("show_depth_labels", "Write the depth on each spot", TRUE),
           checkboxInput("show_track", "Centroid track", TRUE),
           sliderInput("trail_len", "Cell trails (steps)",
-                      min = 0, max = 10, value = 3, step = 1),
-          checkboxInput("show_cells", "Show points (individual cells)", TRUE),
-          checkboxInput("show_depth_labels", "Write the depth on each point", FALSE)
+                      min = 0, max = 10, value = 3, step = 1)
         ),
         
         # right column: currents
@@ -429,7 +468,7 @@ ui <- fluidPage(
                       min = 0.5, max = 10, value = 3, step = 0.5),
           sliderInput("line_width", "Line width",
                       min = 0.5, max = 4, value = 2, step = 0.5)
-        ),
+        )
         
       ),
       
@@ -452,6 +491,13 @@ server <- function(input, output, session) {
   
   cur_step  <- reactive(steps[input$step_idx])
   step_data <- reactive(sim[sim$simulation_step == cur_step(), ])
+  
+  # maximum of the smoothed density over ALL steps, so colours are
+  # comparable while the animation plays
+  field_max <- reactive({
+    sg <- input$heat_sigma
+    max(1e-9, vapply(count_list, function(C) max(smooth_grid(C, sg)), numeric(1)))
+  })
   
   ##########################################################
   # INFO PANEL
@@ -492,7 +538,7 @@ server <- function(input, output, session) {
   })
   
   ##########################################################
-  # BASE MAP (OpenStreetMap-based)
+  # BASE MAP
   ##########################################################
   
   output$map <- renderLeaflet({
@@ -508,7 +554,7 @@ server <- function(input, output, session) {
   })
   
   ##########################################################
-  # FLOW LAYER (u, v FROM THE TABLE, IDW-INTERPOLATED PER STEP)
+  # FLOW LAYER
   ##########################################################
   
   observe({
@@ -532,7 +578,6 @@ server <- function(input, output, session) {
           speedUnit          = "m/s",
           minVelocity        = 0,
           maxVelocity        = max_speed,
-          # tuned for ocean currents (~0.1-1 m/s); the default is for wind
           velocityScale      = (0.05 / max_speed) * input$velocity_scale,
           particleMultiplier = input$particle_mult / 1000,
           lineWidth          = input$line_width,
@@ -565,6 +610,34 @@ server <- function(input, output, session) {
     
     last <- tr[nrow(tr), ]
     
+    # arrow direction = drift direction (degrees clockwise from north);
+    # at the first step it points towards the next centroid position
+    ci <- which(cent$step == last$step)
+    if (ci > 1) {
+      p0 <- cent[ci - 1, ]; p1 <- cent[ci, ]
+    } else if (nrow(cent) > 1) {
+      p0 <- cent[1, ]; p1 <- cent[2, ]
+    } else {
+      p0 <- p1 <- cent[1, ]
+    }
+    angle <- atan2((p1$x - p0$x) * cos(p1$y * pi / 180), p1$y - p0$y) * 180 / pi
+    
+    # SVG arrow with the rotation baked in, passed as an image (data URI)
+    arrow_svg <- sprintf(
+      paste0("<svg xmlns='http://www.w3.org/2000/svg' width='44' height='44' ",
+             "viewBox='-22 -22 44 44'>",
+             "<g transform='rotate(%.1f)'>",
+             "<polygon points='0,-18 12,14 0,7 -12,14' fill='#e63946' ",
+             "stroke='#ffffff' stroke-width='2' stroke-linejoin='round'/>",
+             "</g></svg>"),
+      angle)
+    arrow_icon <- makeIcon(
+      iconUrl = paste0("data:image/svg+xml;charset=utf-8,",
+                       utils::URLencode(arrow_svg, reserved = TRUE)),
+      iconWidth = 44, iconHeight = 44,
+      iconAnchorX = 22, iconAnchorY = 22
+    )
+    
     proxy |>
       addCircleMarkers(
         lng = tr$x, lat = tr$y,
@@ -572,10 +645,9 @@ server <- function(input, output, session) {
         fillColor = "#000000", fillOpacity = 1,
         group = "Track"
       ) |>
-      addCircleMarkers(
+      addMarkers(
         lng = last$x, lat = last$y,
-        radius = 8, weight = 2, color = "#ffffff",
-        fillColor = "#e63946", fillOpacity = 1,
+        icon = arrow_icon,
         label = sprintf("Patch centroid, step %s (%d cells)",
                         last$step, last$n),
         group = "Track"
@@ -595,18 +667,15 @@ server <- function(input, output, session) {
     s <- cur_step()
     d <- sim[sim$simulation_step <= s & sim$simulation_step >= s - k, ]
     
-    # only cells that exist in the current step
     now_ids <- step_data()$id
     d <- d[d$id %in% now_ids, ]
     if (nrow(d) == 0) return()
     
-    # cap for speed
     ids <- unique(d$id)
     if (length(ids) > 300) ids <- sample(ids, 300)
     d <- d[d$id %in% ids, ]
     d <- d[order(d$id, d$simulation_step), ]
     
-    # one NA-separated vector -> one polyline per cell
     pieces <- split(d, d$id)
     pieces <- pieces[vapply(pieces, nrow, integer(1)) > 1]
     if (length(pieces) == 0) return()
@@ -623,28 +692,31 @@ server <- function(input, output, session) {
   })
   
   ##########################################################
-  # CELLS (OVERLAPPING CELLS MERGED INTO ONE MARKER WITH A COUNT)
+  # CELLS: HEAT MAP + NUMBERS
   #
-  # Daughter cells are created ~100 m from their parent and the patch
-  # cohesion step pulls them back together, so they overlap on the map.
-  # Cells closer than ~MERGE_PX screen pixels are merged into one marker
-  # whose size grows with the number of cells. Zoom in and they separate.
+  # Cells closer than ~MERGE_PX screen pixels are merged into one spot
+  # (as before). The heat map is weighted by the number of cells in each
+  # spot, so overlapping cells appear as hotter areas. The count is still
+  # written on every merged spot, and an invisible marker on top keeps the
+  # hover label and click popup.
   ##########################################################
   
   MERGE_PX <- 8
   
   observe({
     proxy <- leafletProxy("map") |>
+      clearGroup("Heat") |>
       clearGroup("Cells") |>
+      removeControl("heat_legend") |>
       removeControl("depth_legend")
     
     d <- step_data()
-    if (!isTRUE(input$show_cells) || nrow(d) == 0) return()
+    if (nrow(d) == 0) return()
+    if (!isTRUE(input$show_heat) && !isTRUE(input$show_cells)) return()
     
     zoom <- input$map_zoom
     if (is.null(zoom)) zoom <- 6
     
-    # size of one screen pixel in degrees at this zoom level
     deg_per_px <- 360 / (256 * 2^zoom)
     bin <- MERGE_PX * deg_per_px
     
@@ -659,6 +731,48 @@ server <- function(input, output, session) {
       n = n
     )
     
+    # ---- repel the spots (numbers / depth labels / hover markers) ----
+    if (isTRUE(input$repel_px > 0) && nrow(m) > 1) {
+      ky <- 1 / cos(mean(m$y) * pi / 180)     # Mercator: pixels per deg lat
+      rp <- repel_xy(m$x / deg_per_px, m$y * ky / deg_per_px, input$repel_px)
+      m$x <- rp$x * deg_per_px
+      m$y <- rp$y * deg_per_px / ky
+    }
+    
+    # ---- radar-style density field (same colour scale in every step) ----
+    if (isTRUE(input$show_heat)) {
+      S    <- smooth_grid(count_list[[input$step_idx]], input$heat_sigma)
+      fmax <- field_max()
+      thr  <- input$heat_min * fmax
+      hit  <- which(S > thr, arr.ind = TRUE)
+      
+      if (nrow(hit) > 0) {
+        pal  <- colorNumeric(radar_cols, domain = c(0, fmax), na.color = "transparent")
+        vals <- S[hit]
+        proxy <- proxy |>
+          addRectangles(
+            lng1 = rad_xlo + (hit[, 2] - 1) * rdx,
+            lng2 = rad_xlo + hit[, 2] * rdx,
+            lat1 = rad_ylo + (hit[, 1] - 1) * rdy,
+            lat2 = rad_ylo + hit[, 1] * rdy,
+            stroke = FALSE, weight = 0,
+            fillColor = pal(pmin(vals, fmax)),
+            fillOpacity = input$heat_opacity,
+            group = "Heat"
+          ) |>
+          addLegend(
+            position = "bottomleft",
+            pal = pal, values = c(0, fmax),
+            title = "Cell density",
+            labFormat = labelFormat(digits = 1),
+            opacity = 0.95,
+            layerId = "heat_legend"
+          )
+      }
+    }
+    
+    if (!isTRUE(input$show_cells)) return()
+    
     ids_txt <- vapply(split(d$id, grp), function(i) {
       s <- paste(head(i, 8), collapse = ", ")
       if (length(i) > 8) s <- paste0(s, ", ...")
@@ -670,28 +784,27 @@ server <- function(input, output, session) {
       m$n, ifelse(m$n == 1, "", "s"), ids_txt, m$z
     )
     
-    # hover text: depth of the cell (mean depth for merged markers)
     hover_txt <- ifelse(
       m$n == 1,
       sprintf("Depth %.1f m", m$z),
       sprintf("%d cells, mean depth %.1f m", m$n, m$z)
     )
     
-    # markers coloured by depth
+    # markers coloured by depth on top of the heat map (also carry the
+    # hover label and click popup)
     proxy <- proxy |>
       addCircleMarkers(
         lng = m$x, lat = m$y,
-        radius = pmin(22, 5 + 3 * log2(m$n)),
-        weight = 1.5,
-        color = "#ffffff",
-        fillColor = depth_pal(m$z),
-        fillOpacity = 0.95,
+        radius = pmin(16, 6 + 2 * log2(m$n)),
+        stroke = FALSE,
+        fillColor = "#000000",
+        fillOpacity = 0,
         popup = popup_txt,
         label = hover_txt,
         group = "Cells"
       )
     
-    # count labels only on merged markers
+    # count numbers on merged spots
     mm <- m[m$n > 1, , drop = FALSE]
     if (nrow(mm) > 0) {
       proxy <- proxy |>
@@ -700,17 +813,17 @@ server <- function(input, output, session) {
           label = as.character(mm$n),
           labelOptions = labelOptions(
             noHide = TRUE, direction = "center", textOnly = TRUE,
-            style = list("font-weight" = "bold", "font-size" = "11px",
+            style = list("font-weight" = "bold", "font-size" = "12px",
                          "color" = "#111111",
-                         "text-shadow" = "0 0 3px #fff, 0 0 3px #fff")
+                         "text-shadow" = "0 0 3px #fff, 0 0 3px #fff, 0 0 5px #fff")
           ),
           group = "Cells"
         )
     }
     
-    # optional: write the depth next to every marker
+    # optional: depth next to every spot
     if (isTRUE(input$show_depth_labels)) {
-      proxy <- proxy |>
+      proxy |>
         addLabelOnlyMarkers(
           lng = m$x, lat = m$y,
           label = sprintf("%.1f m", m$z),
@@ -724,24 +837,10 @@ server <- function(input, output, session) {
           group = "Cells"
         )
     }
-    
-    # depth legend (shallow at the top)
-    proxy |>
-      addLegend(
-        position = "bottomleft",
-        pal = depth_pal, values = z_dom,
-        title = "Depth (m)",
-        labFormat = labelFormat(digits = 1),
-        opacity = 0.95,
-        layerId = "depth_legend"
-      )
   })
   
-  # re-draw the merged cells when the zoom changes (input$map_zoom is
-  # read inside the observer above, so this happens automatically)
-  
   ##########################################################
-  # RESET VIEW: zoom to the extent of the data only
+  # RESET VIEW
   ##########################################################
   
   observeEvent(input$reset_view, {
@@ -750,7 +849,7 @@ server <- function(input, output, session) {
   })
   
   ##########################################################
-  # DISTRIBUTIONS (age, settling velocity, diameter, depth)
+  # DISTRIBUTIONS
   ##########################################################
   
   dist_values <- reactive({
@@ -766,7 +865,6 @@ server <- function(input, output, session) {
     info <- var_info[[input$dist_var]]
     v <- dist_values()
     
-    # fixed x range over ALL steps so histograms are comparable in time
     rng <- range(sim[[input$dist_var]] * info$scale, na.rm = TRUE)
     if (diff(rng) == 0) rng <- rng + c(-0.5, 0.5)
     breaks <- seq(rng[1], rng[2], length.out = input$dist_bins + 1)
