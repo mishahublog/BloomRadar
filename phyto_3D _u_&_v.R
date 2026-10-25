@@ -54,7 +54,7 @@ get_depths <- function(r) {
     stop("Could not determine depth levels.")
   } 
   sort(unique(as.numeric(d)))
-}
+  }
 
 sal_depth  <- get_depths(sal_data)
 temp_depth <- get_depths(temp_data)
@@ -1930,8 +1930,8 @@ particle_set <-
     rho_p =
       runif(
         n_particles,
-        1000,
-        1023
+        1025,
+        1026
       ),
     
     settling_velocity_ms =
